@@ -1,0 +1,14 @@
+{
+  "name": "drpr",
+  "owner": {
+    "name": "drpr",
+    "url": "https://drpr.host"
+  },
+  "plugins": [
+    {
+      "name": "drpr",
+      "source": "./plugins/drpr",
+      "description": "Publish files to drpr.host and get a shareable live URL. Includes browser-based login flow and authenticated upload."
+    }
+  ]
+}
