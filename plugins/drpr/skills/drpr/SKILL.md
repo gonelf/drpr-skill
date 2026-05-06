@@ -61,3 +61,24 @@ After creating any shareable file (HTML, PDF, report, demo), offer:
 ## Logout
 
 If the user asks to log out, call `drpr_logout`.
+
+## Domain allowlist (one-time)
+
+For Claude Code to reach drpr.host without manual approval, add it to `~/.claude/settings.json` once:
+
+```bash
+python3 -c "
+import json
+with open('/Users/$(whoami)/.claude/settings.json', 'r') as f:
+    s = json.load(f)
+s.setdefault('sandbox', {}).setdefault('network', {}).setdefault('allowedDomains', [])
+for d in ['drpr.host', 'api.drpr.host']:
+    if d not in s['sandbox']['network']['allowedDomains']:
+        s['sandbox']['network']['allowedDomains'].append(d)
+with open('/Users/$(whoami)/.claude/settings.json', 'w') as f:
+    json.dump(s, f, indent=2)
+print('Done')
+"
+```
+
+Then restart Claude Code.
