@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
 drpr MCP server — stdio transport.
-Bundled with the drpr Claude Code plugin.
-Tools: drpr_login, drpr_upload, drpr_status, drpr_logout
+Tools: drpr_login_start, drpr_login_poll, drpr_upload, drpr_status, drpr_logout
 """
 
 import json
 import sys
 import os
-import time
 import uuid
 import urllib.request
 import urllib.error
@@ -18,8 +16,6 @@ import subprocess
 import platform
 
 DRPR_BASE = "https://drpr.host"
-POLL_INTERVAL = 2
-AUTH_TIMEOUT = 600
 
 
 def send(obj):
@@ -38,6 +34,8 @@ def err(req_id, code, message):
 def text_result(req_id, text):
     send(ok(req_id, {"content": [{"type": "text", "text": text}]}))
 
+
+# ── Key storage ───────────────────────────────────────────────────────────────
 
 def key_path():
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
@@ -68,6 +66,8 @@ def delete_key():
         pass
 
 
+# ── Browser ───────────────────────────────────────────────────────────────────
+
 def open_browser(url):
     try:
         s = platform.system()
@@ -81,6 +81,8 @@ def open_browser(url):
     except Exception:
         return False
 
+
+# ── HTTP ──────────────────────────────────────────────────────────────────────
 
 def get_json(url, headers=None):
     req = urllib.request.Request(url, headers=headers or {})
@@ -109,7 +111,7 @@ def multipart_upload(file_path, subdomain, api_key):
     body.write(f"\r\n--{boundary}--\r\n".encode())
 
     req = urllib.request.Request(
-        f"{DRPR_BASE}/api/v1/upload",
+        f"{DRPR_BASE}/api/upload",
         data=body.getvalue(),
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -121,7 +123,10 @@ def multipart_upload(file_path, subdomain, api_key):
         return json.loads(r.read().decode())
 
 
-def tool_login(args, req_id):
+# ── Tools ─────────────────────────────────────────────────────────────────────
+
+def tool_login_start(args, req_id):
+    """Generate a device token, open the browser, return the token for polling."""
     existing = load_key()
     if existing and not args.get("force"):
         text_result(req_id, "already_authenticated")
@@ -129,28 +134,38 @@ def tool_login(args, req_id):
 
     device_token = uuid.uuid4().hex
     login_url = f"{DRPR_BASE}/cli-login?token={device_token}"
-    poll_url = f"{DRPR_BASE}/api/cli/token/{device_token}"
 
     opened = open_browser(login_url)
     prefix = "browser_opened" if opened else "open_browser"
-    text_result(req_id, f"{prefix}:{login_url}")
 
-    deadline = time.time() + AUTH_TIMEOUT
-    while time.time() < deadline:
-        time.sleep(POLL_INTERVAL)
-        try:
-            data = get_json(poll_url)
-            if data.get("api_key"):
-                save_key(data["api_key"])
-                text_result(req_id, f"authenticated:{data['api_key'][:8]}...")
-                return
-            if data.get("expired"):
-                text_result(req_id, "error:login_expired")
-                return
-        except Exception:
-            continue
+    # Return token so Claude can poll with drpr_login_poll
+    text_result(req_id, f"{prefix}:{login_url}|token:{device_token}")
 
-    text_result(req_id, "error:login_timeout")
+
+def tool_login_poll(args, req_id):
+    """Poll once for a given device token. Returns pending, authenticated, or expired."""
+    device_token = args.get("token", "").strip()
+    if not device_token:
+        text_result(req_id, "error:token required")
+        return
+
+    poll_url = f"{DRPR_BASE}/api/cli/token/{device_token}"
+    try:
+        data = get_json(poll_url)
+        if data.get("api_key"):
+            save_key(data["api_key"])
+            text_result(req_id, f"authenticated:{data['api_key'][:8]}...")
+        elif data.get("expired"):
+            text_result(req_id, "expired")
+        else:
+            text_result(req_id, "pending")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            text_result(req_id, "expired")
+        else:
+            text_result(req_id, f"error:http_{e.code}")
+    except Exception as e:
+        text_result(req_id, f"error:{str(e)}")
 
 
 def tool_upload(args, req_id):
@@ -214,15 +229,28 @@ def tool_logout(args, req_id):
     text_result(req_id, "logged_out")
 
 
+# ── MCP protocol ──────────────────────────────────────────────────────────────
+
 TOOLS = [
     {
-        "name": "drpr_login",
-        "description": "Authenticate with drpr.host. Opens browser and polls until complete. Pass force=true to re-authenticate.",
+        "name": "drpr_login_start",
+        "description": "Start the drpr login flow. Opens browser and returns a token for polling. Pass force=true to re-authenticate.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "force": {"type": "boolean", "description": "Force re-authentication even if already logged in."}
             }
+        }
+    },
+    {
+        "name": "drpr_login_poll",
+        "description": "Poll once to check if the user has completed login. Returns: pending, authenticated:KEY..., expired, or error:*. Call every 2-3 seconds until not pending.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "token": {"type": "string", "description": "Device token returned by drpr_login_start."}
+            },
+            "required": ["token"]
         }
     },
     {
@@ -250,7 +278,8 @@ TOOLS = [
 ]
 
 HANDLERS = {
-    "drpr_login": tool_login,
+    "drpr_login_start": tool_login_start,
+    "drpr_login_poll": tool_login_poll,
     "drpr_upload": tool_upload,
     "drpr_status": tool_status,
     "drpr_logout": tool_logout,
@@ -266,7 +295,7 @@ def handle(request):
         send(ok(req_id, {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "drpr", "version": "1.0.0"}
+            "serverInfo": {"name": "drpr", "version": "2.0.0"}
         }))
     elif method == "tools/list":
         send(ok(req_id, {"tools": TOOLS}))
